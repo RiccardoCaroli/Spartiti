@@ -151,6 +151,7 @@ canvas{display:block;touch-action:none;}
   <button class="tb" id="btn-save"><i class="ti ti-device-floppy"></i> Salva</button>
   <button class="tb" id="btn-pdf"><i class="ti ti-file-type-pdf"></i> PDF</button>
   <button class="tb" id="btn-arc"><i class="ti ti-database-export"></i> Archivio</button>
+  <button class="tb" id="btn-annot-top"><i class="ti ti-message-plus"></i> Annota</button>
 </div>
 
 <!-- TABS -->
@@ -1209,31 +1210,10 @@ CV.addEventListener('mousemove', e => {
 
 
 CV.addEventListener('click', e => {
-  const {x,y} = gxy(e);
-  if (hitDel(x,y)) { delSel(); return; }
-  const now = Date.now(), hi = hitN(x,y);
-  if (hi >= 0) {
-    if (hi===lcI && now-lcT<DBL) {
-      selI=hi; const n=S.notes[hi]; delB={x:n._x+SG*2, y:n._y-SG*2.5};
-      ss('Nota selezionata — × per cancellare · Esc per deselezionare'); render();
-    } else {
-      if (selI!==null) { selI=null; delB=null; }
-      pH(); cycleD(hi); render();
-    }
-    lcI=hi; lcT=now; return;
-  }
-  // Check annotation hit
-  const annotHit = hitAnnotation(x,y);
-  if (annotHit) {
-    const a = annotations.find(a=>a.id===annotHit);
-    if (a) openAnnotModal(a.noteIdx, a.x||x, a.y||y, a.type, a.id);
-    return;
-  }
-
-  if (selI!==null) { selI=null; delB=null; render(); lcI=-1; return; }
-  lcI=-1;
-  const ri=rowAt(y), {name,octave}=y2n(y,ri);
-  addN(name, octave, null);
+  // On desktop, note adding is handled by mouseup.
+  // This handler only manages touch-based cycling (already in touchend)
+  // and is the fallback for pointer devices that don't fire mouseup.
+  // Skip if mouseup already handled it.
 });
 
 let ltI=-1, ltT=0;
@@ -1370,6 +1350,7 @@ CV.addEventListener('touchend', e => {
 // ── MOUSE DRAG (desktop: Chrome, Edge, Firefox) ──────────────────────
 let mouseDragIdx = -1, mouseDragStartY = 0, mouseDragSnapY = 0;
 let mouseDragLastStep = -1, mouseDragMoved = false;
+let mouseDownPos = null, mouseLPTimer = null;
 
 CV.addEventListener('mousedown', e => {
   const {x,y} = gxy(e);
@@ -1384,10 +1365,16 @@ CV.addEventListener('mousedown', e => {
     e.preventDefault();
     return;
   }
-  // Click on empty — add note
-  if (selI !== null) { selI=null; delB=null; render(); return; }
-  const ri = rowAt(y), {name,octave} = y2n(y,ri);
-  addN(name, octave, null);
+  // Store click position — note added on mouseup if no drag
+  mouseDownPos = {x, y};
+  // Long press timer for annotation on empty space
+  if (mouseLPTimer) clearTimeout(mouseLPTimer);
+  mouseLPTimer = setTimeout(() => {
+    mouseLPTimer = null;
+    mouseDownPos = null;
+    try { navigator.vibrate && navigator.vibrate(40); } catch(e2) {}
+    openAnnotModal(-1, x, y, 'free');
+  }, LP_MS);
 });
 
 CV.addEventListener('mousemove', e => {
@@ -1419,19 +1406,50 @@ CV.addEventListener('mousemove', e => {
 });
 
 CV.addEventListener('mouseup', e => {
-  if (mouseDragIdx < 0) return;
-  const hi = mouseDragIdx;
-  mouseDragIdx = -1;
-  if (S.notes[hi]) delete S.notes[hi]._dragHistPushed;
-  if (!mouseDragMoved) {
-    // Simple click → cycle duration
-    pH(); cycleD(hi); render();
-  } else {
-    ss('Nota spostata'); render(); ur();
+  // Cancel long press timer
+  if (mouseLPTimer) { clearTimeout(mouseLPTimer); mouseLPTimer = null; }
+
+  // If we were dragging a note
+  if (mouseDragIdx >= 0) {
+    const hi = mouseDragIdx;
+    mouseDragIdx = -1;
+    if (S.notes[hi]) delete S.notes[hi]._dragHistPushed;
+    if (!mouseDragMoved) {
+      // Click on note → check annotation hit first, then cycle
+      const {x,y} = gxy(e);
+      const annotHit = hitAnnotation(x,y);
+      if (annotHit) {
+        const a = annotations.find(a=>a.id===annotHit);
+        if (a) openAnnotModal(a.noteIdx, a.x||x, a.y||y, a.type, a.id);
+        mouseDownPos = null; return;
+      }
+      pH(); cycleD(hi); render();
+    } else {
+      ss('Nota spostata'); render(); ur();
+    }
+    mouseDownPos = null;
+    return;
+  }
+
+  // Click on empty space → add note on release
+  if (mouseDownPos) {
+    const {x,y} = mouseDownPos;
+    mouseDownPos = null;
+    // Check annotation hit
+    const annotHit = hitAnnotation(x,y);
+    if (annotHit) {
+      const a = annotations.find(a=>a.id===annotHit);
+      if (a) openAnnotModal(a.noteIdx, a.x||x, a.y||y, a.type, a.id);
+      return;
+    }
+    if (selI !== null) { selI=null; delB=null; render(); return; }
+    const ri = rowAt(y), {name,octave} = y2n(y,ri);
+    addN(name, octave, null);
   }
 });
 
 CV.addEventListener('mouseleave', e => {
+  if (mouseLPTimer) { clearTimeout(mouseLPTimer); mouseLPTimer = null; mouseDownPos = null; }
   if (mouseDragIdx >= 0) {
     // Released outside canvas
     if (S.notes[mouseDragIdx]) delete S.notes[mouseDragIdx]._dragHistPushed;
@@ -1947,6 +1965,19 @@ function hitAnnotation(cx, cy) {
   }
   return null;
 }
+
+// Topbar annota button
+document.getElementById('btn-annot-top').addEventListener('click', () => {
+  if (selI !== null && S.notes[selI]) {
+    const n = S.notes[selI];
+    openAnnotModal(selI, n._x||100, n._y||100, 'above');
+  } else if (S.notes.length > 0) {
+    const last = S.notes[S.notes.length-1];
+    openAnnotModal(S.notes.length-1, last._x||100, last._y||100, 'above');
+  } else {
+    openAnnotModal(-1, 200, 200, 'free');
+  }
+});
 
 // Palette annotation buttons
 document.querySelectorAll('[data-a="annot"]').forEach(btn => {
